@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"><title>Impuesto Actividades Económicas</title>
+<style>
+body{font-family:Arial; margin:20px}
+.card{border:1px solid #ccc; padding:15px; margin-bottom:15px; border-radius:8px}
+.error{color:red; font-weight:bold}
+.ok{color:green}
+table{width:100%; border-collapse:collapse} td,th{border:1px solid #ddd; padding:6px}
+</style>
+</head>
+<body>
+<h2>Registro de Período y Balance Empresarial - Ley 11801/11802</h2>
+
+<div class="card">
+<h3>Clientes (CRUD)</h3>
+<input id="c_nombre" placeholder="Nombre empresa">
+<input id="c_nit" placeholder="NIT">
+<button onclick="registrarCliente()">Registrar Empresa</button>
+<div id="clientes_list"></div>
+</div>
+
+<div class="card">
+<h3>Registro de Período [Desde, Hasta) - RF02</h3>
+<select id="sel_cliente"></select>
+<select id="sel_producto"></select><br><br>
+Desde: <input type="date" id="p_desde" value="2025-01-01">
+Hasta: <input type="date" id="p_hasta" value="2026-01-01">
+Balance: <input type="number" id="p_balance" step="0.01" placeholder="Ej: 545.00" oninput="calcularInmediato()">
+Cantidad: <input type="number" id="p_cantidad" value="1.00" step="0.01">
+
+<div id="calculo_detalle" style="background:#f5f5f5; padding:10px; margin:10px 0"></div>
+<button onclick="registrarPeriodo()">Guardar Período Independiente</button>
+<div id="msg_periodo"></div>
+</div>
+
+<div class="card">
+<h3>Períodos Históricos - Conservación RF14 (No se recalcula)</h3>
+<div id="periodos_list"></div>
+<p><b>Total administrativo referencial:</b> <span id="total_ref">0.00</span> - No es mensualidad vigente (RF21)</p>
+<p><b>Impuesto mensual vigente:</b> <span id="vigente">-</span></p>
+</div>
+
+<script>
+async function api(path, method='GET', data=null){
+  const opts={method, headers:{'Content-Type':'application/json'}};
+  if(data) opts.body=JSON.stringify(data);
+  const r=await fetch(path, opts);
+  const j=await r.json();
+  if(!r.ok) throw new Error(j.error);
+  return j;
+}
+
+async function loadClientes(){
+  const clientes=await api('/api/clientes');
+  document.getElementById('clientes_list').innerHTML=clientes.map(c=>`${c.id} - ${c.nombre} (${c.tipo}) <button onclick="delCliente(${c.id})">X</button>`).join('<br>');
+  document.getElementById('sel_cliente').innerHTML=clientes.filter(c=>c.tipo==='empresa').map(c=>`<option value="${c.id}">${c.nombre}</option>`).join('');
+  loadPeriodos();
+}
+async function loadProductos(){
+  const prods=await api('/api/productos');
+  document.getElementById('sel_producto').innerHTML=prods.map(p=>`<option value="${p.codigo}">${p.codigo} - ${p.nombre}</option>`).join('');
+}
+async function registrarCliente(){
+  await api('/api/clientes/registrar','POST',{nombre:c_nombre.value, nit:c_nit.value, tipo:'empresa'});
+  loadClientes();
+}
+async function delCliente(id){ await api('/api/clientes/eliminar','POST',{id}); loadClientes(); }
+
+async function calcularInmediato(){ // RF17, RF18
+  try{
+    const balance=parseFloat(document.getElementById('p_balance').value);
+    const prod=document.getElementById('sel_producto').value;
+    if(!balance ||!prod) return;
+    const res=await api('/api/tarifas/calcular','POST',{balance, producto_codigo:prod});
+    document.getElementById('calculo_detalle').innerHTML=`
+      Balance: $${res.detalle.balance}<br>
+      Rango aplicado: ${res.detalle.rango}<br>
+      Precio base: $${res.detalle.precio_base}<br>
+      Excedente: $${res.detalle.excedente}<br>
+      Bloques CEIL: ${res.detalle.bloques}<br>
+      Adicional: $${res.detalle.adicional}<br>
+      <b>Impuesto mensual: $${res.precio}</b><br>
+      Fórmula: ${res.detalle.formula || res.detalle.porcentaje+'%'}
+    `;
+  }catch(e){ document.getElementById('calculo_detalle').innerHTML=`<span class="error">${e.message}</span>`; }
+}
+
+async function registrarPeriodo(){
+  try{
+    const payload={
+      cliente_id:parseInt(sel_cliente.value),
+      producto_codigo:sel_producto.value,
+      desde:p_desde.value, hasta:p_hasta.value,
+      balance:parseFloat(p_balance.value),
+      cantidad:parseFloat(p_cantidad.value)
+    };
+    const res=await api('/api/periodos/registrar','POST',payload);
+    document.getElementById('msg_periodo').innerHTML=`<span class="ok">Guardado! Precio mensual $${res.precio_mensual} - Subtotal $${res.subtotal}</span>`;
+    loadPeriodos();
+  }catch(e){ document.getElementById('msg_periodo').innerHTML=`<span class="error">${e.message}</span>`; }
+}
+
+async function loadPeriodos(){
+  const cid=sel_cliente.value;
+  if(!cid) return;
+  const periodos=await api('/api/periodos?cliente_id='+cid);
+  let total=0;
+  periodos.forEach(p=> total+=parseFloat(p.precio_mensual));
+  document.getElementById('total_ref').innerText='$'+total.toFixed(2);
+
+  // Vigente segun fecha hoy
+  const hoy=new Date().toISOString().split('T')[0];
+  const vigente=periodos.find(p=> p.fecha_desde <= hoy && hoy < p.fecha_hasta);
+  document.getElementById('vigente').innerText=vigente?`$${vigente.precio_mensual} (Periodo ${vigente.fecha_desde} a ${vigente.fecha_hasta})`:'Ninguno';
+
+  document.getElementById('periodos_list').innerHTML=`<table><tr><th>Desde</th><th>Hasta</th><th>Balance</th><th>Precio Mensual</th><th>Estado</th></tr>
+  ${periodos.map(p=>`<tr><td>${p.fecha_desde}</td><td>${p.fecha_hasta}</td><td>$${p.balance}</td><td>$${p.precio_mensual}</td><td>${p.estado}</td></tr>`).join('')}</table>`;
+}
+
+loadClientes(); loadProductos();
+document.getElementById('sel_cliente').addEventListener('change', loadPeriodos);
+document.getElementById('sel_producto').addEventListener('change', calcularInmediato);
+document.getElementById('p_desde').addEventListener('change', calcularInmediato);
+</script>
+</body>
+</html>
